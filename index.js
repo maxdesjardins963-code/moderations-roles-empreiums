@@ -75,6 +75,14 @@ const RANKS = RANK_DEFINITIONS.filter((rank) => {
   return true;
 });
 
+// Optional: extra staff roles (for example Community Manager). Members with one of
+// these roles count as staff for ?help, but they get no moderation permissions or
+// limits from it. Comma-separated role IDs.
+const EXTRA_STAFF_ROLE_IDS = (process.env.EXTRA_STAFF_ROLE_IDS || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
+
 // Optional: extra roles that can never be targeted by moderation commands.
 const PROTECTED_ROLE_IDS = (process.env.PROTECTED_ROLE_IDS || '')
   .split(',')
@@ -171,6 +179,10 @@ function getRank(member) {
     if (member.roles.cache.has(rank.roleId)) return rank;
   }
   return null;
+}
+
+function hasExtraStaffRole(member) {
+  return EXTRA_STAFF_ROLE_IDS.some((roleId) => member.roles.cache.has(roleId));
 }
 
 function formatLimit(value) {
@@ -572,20 +584,19 @@ async function handleHelp(message, rank) {
     '`?limits` - Show your moderation limits and next reset',
   ];
 
-  if (rank.key === 'owner') {
+  if (rank && rank.key === 'owner') {
     lines.push("`?limits <@user or ID>` - Show another staff member's limits");
   }
 
   lines.push('`?help` - Show this message');
 
+  const rankLabel = rank ? rank.name : 'Staff (no moderation rank)';
+  const note = rank
+    ? 'Mute durations: `30m`, `2h`, `1d` (maximum 28d).'
+    : 'Your staff role does not grant access to the moderation commands above.';
+
   return message.reply({
-    embeds: [
-      infoEmbed(
-        'Moderation Commands',
-        `**Your rank:** ${rank.name}\n\n${lines.join('\n')}\n\n` +
-          'Mute durations: `30m`, `2h`, `1d` (maximum 28d).'
-      ),
-    ],
+    embeds: [infoEmbed('Moderation Commands', `**Your rank:** ${rankLabel}\n\n${lines.join('\n')}\n\n${note}`)],
   });
 }
 
@@ -610,7 +621,14 @@ client.on('messageCreate', async (message) => {
     message.member = member;
 
     // Non-staff members are ignored silently. Staff information is never exposed.
+    // getRank uses the highest configured rank, so extra roles never lower it.
     const rank = getRank(member);
+    if (!rank && !hasExtraStaffRole(member)) return;
+
+    // ?help is available to every staff member.
+    if (command === 'help') return await handleHelp(message, rank);
+
+    // Everything else requires a moderation rank.
     if (!rank) return;
 
     switch (command) {
@@ -626,8 +644,6 @@ client.on('messageCreate', async (message) => {
         return await handleUnmute(message, args);
       case 'limits':
         return await handleLimits(message, args, rank);
-      case 'help':
-        return await handleHelp(message, rank);
       default:
         return null;
     }
