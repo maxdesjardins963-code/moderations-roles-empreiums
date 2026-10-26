@@ -616,9 +616,10 @@ client.on('messageCreate', async (message) => {
     if (!known.includes(command)) return;
 
     // Make sure the member and their roles are fresh.
-    const member = message.member || (await message.guild.members.fetch(message.author.id).catch(() => null));
+    // message.member is read-only. Fetching caches the member, which fills the getter.
+    if (!message.member) await message.guild.members.fetch(message.author.id).catch(() => null);
+    const member = message.member;
     if (!member) return;
-    message.member = member;
 
     // Non-staff members are ignored silently. Staff information is never exposed.
     // getRank uses the highest configured rank, so extra roles never lower it.
@@ -665,7 +666,7 @@ http
   })
   .listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
