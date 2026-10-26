@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const {
   Client,
   GatewayIntentBits,
@@ -561,6 +562,33 @@ async function handleLimits(message, args, rank) {
   });
 }
 
+async function handleHelp(message, rank) {
+  const lines = [
+    '`?ban <@user or ID> [reason]` - Ban a user (uses a ban)',
+    '`?kick <@user or ID> [reason]` - Kick a member (uses a kick)',
+    '`?mute <@user or ID> <duration> [reason]` - Mute a member (uses a mute)',
+    '`?unban <user ID> [reason]` - Unban a user',
+    '`?unmute <@user or ID> [reason]` - Remove a mute',
+    '`?limits` - Show your moderation limits and next reset',
+  ];
+
+  if (rank.key === 'owner') {
+    lines.push("`?limits <@user or ID>` - Show another staff member's limits");
+  }
+
+  lines.push('`?help` - Show this message');
+
+  return message.reply({
+    embeds: [
+      infoEmbed(
+        'Moderation Commands',
+        `**Your rank:** ${rank.name}\n\n${lines.join('\n')}\n\n` +
+          'Mute durations: `30m`, `2h`, `1d` (maximum 28d).'
+      ),
+    ],
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Message handler                                                     */
 /* ------------------------------------------------------------------ */
@@ -573,7 +601,7 @@ client.on('messageCreate', async (message) => {
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
     const command = (args.shift() || '').toLowerCase();
 
-    const known = ['ban', 'kick', 'mute', 'unban', 'unmute', 'limits'];
+    const known = ['ban', 'kick', 'mute', 'unban', 'unmute', 'limits', 'help'];
     if (!known.includes(command)) return;
 
     // Make sure the member and their roles are fresh.
@@ -598,6 +626,8 @@ client.on('messageCreate', async (message) => {
         return await handleUnmute(message, args);
       case 'limits':
         return await handleLimits(message, args, rank);
+      case 'help':
+        return await handleHelp(message, rank);
       default:
         return null;
     }
@@ -609,6 +639,15 @@ client.on('messageCreate', async (message) => {
 /* ------------------------------------------------------------------ */
 /* Startup                                                             */
 /* ------------------------------------------------------------------ */
+
+// Minimal HTTP server so Render detects an open port (Web Service hosting).
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running.');
+  })
+  .listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -625,13 +664,3 @@ if (!TOKEN) {
 
 loadStore();
 client.login(TOKEN);
-
-const http = require('http');
-
-const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is running.');
-  })
-  .listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
