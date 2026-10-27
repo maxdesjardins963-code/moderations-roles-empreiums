@@ -23,6 +23,14 @@ const MAX_TIMEOUT_MS = 28 * 24 * 60 * 60 * 1000; // Discord timeout cap
 const TOKEN = process.env.TOKEN;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 
+// Channel for message logs (deleted and edited messages).
+const MESSAGE_LOG_CHANNEL_ID = process.env.MESSAGE_LOG_CHANNEL_ID || '1564665733114236988';
+// Set LOG_ALL_MESSAGES=true to also log every message that is sent.
+const LOG_ALL_MESSAGES = String(process.env.LOG_ALL_MESSAGES || '').toLowerCase() === 'true';
+
+// Stored warnings (kept separately from the limit counters).
+const WARNINGS_FILE = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'warnings.json');
+
 // Persistent storage location. On hosts with an ephemeral filesystem
 // (for example Render without a disk), point DATA_DIR to a persistent disk.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -35,35 +43,35 @@ const RANK_DEFINITIONS = [
     name: 'Owner',
     level: 5,
     roleId: process.env.OWNER_ROLE_ID,
-    limits: { ban: Infinity, kick: Infinity, mute: Infinity },
+    limits: { ban: Infinity, kick: Infinity, mute: Infinity, warn: Infinity },
   },
   {
     key: 'supervisor',
     name: 'Supervisor',
     level: 4,
     roleId: process.env.SUPERVISOR_ROLE_ID,
-    limits: { ban: 5, kick: 7, mute: 12 },
+    limits: { ban: 5, kick: 7, mute: 12, warn: 15 },
   },
   {
     key: 'senior_moderator',
     name: 'Senior Moderator',
     level: 3,
     roleId: process.env.SENIOR_MODERATOR_ROLE_ID,
-    limits: { ban: 3, kick: 5, mute: 8 },
+    limits: { ban: 3, kick: 5, mute: 8, warn: 10 },
   },
   {
     key: 'moderator',
     name: 'Moderator',
     level: 2,
     roleId: process.env.MODERATOR_ROLE_ID,
-    limits: { ban: 2, kick: 3, mute: 5 },
+    limits: { ban: 2, kick: 3, mute: 5, warn: 6 },
   },
   {
     key: 'trial_moderator',
     name: 'Trial Moderator',
     level: 1,
     roleId: process.env.TRIAL_MODERATOR_ROLE_ID,
-    limits: { ban: 1, kick: 2, mute: 3 },
+    limits: { ban: 1, kick: 2, mute: 3, warn: 4 },
   },
 ];
 
@@ -89,8 +97,9 @@ const PROTECTED_ROLE_IDS = (process.env.PROTECTED_ROLE_IDS || '')
   .map((id) => id.trim())
   .filter(Boolean);
 
-const ACTION_LABELS = { ban: 'Ban', kick: 'Kick', mute: 'Mute' };
-const ACTION_PLURALS = { ban: 'Bans', kick: 'Kicks', mute: 'Mutes' };
+const ACTION_LABELS = { ban: 'Ban', kick: 'Kick', mute: 'Mute', warn: 'Warn' };
+const ACTION_PLURALS = { ban: 'Bans', kick: 'Kicks', mute: 'Mutes', warn: 'Warns' };
+const ACTION_PAST = { ban: 'banned', kick: 'kicked', mute: 'muted', warn: 'warned' };
 
 /* ------------------------------------------------------------------ */
 /* Persistent storage                                                  */
@@ -125,15 +134,43 @@ function saveStore() {
   fs.renameSync(tmp, DATA_FILE);
 }
 
+let warnings = {};
+
+function loadWarnings() {
+  try {
+    warnings = JSON.parse(fs.readFileSync(WARNINGS_FILE, 'utf8'));
+    if (typeof warnings !== 'object' || warnings === null || Array.isArray(warnings)) {
+      throw new Error('Invalid warnings format');
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('[storage] Could not read the warnings file.', error.message);
+    warnings = {};
+  }
+}
+
+function saveWarnings() {
+  fs.mkdirSync(path.dirname(WARNINGS_FILE), { recursive: true });
+  const tmp = `${WARNINGS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(warnings, null, 2));
+  fs.renameSync(tmp, WARNINGS_FILE);
+}
+
+function addWarning(targetId, moderatorId, reason) {
+  if (!Array.isArray(warnings[targetId])) warnings[targetId] = [];
+  warnings[targetId].push({ moderatorId, reason, timestamp: Date.now() });
+  saveWarnings();
+}
+
 // Returns the staff member's record, starting a new 10-hour period when needed.
 function getRecord(userId) {
   const now = Date.now();
   let record = store[userId];
   if (!record || typeof record.resetAt !== 'number' || now >= record.resetAt) {
-    record = { resetAt: now + PERIOD_MS, ban: 0, kick: 0, mute: 0 };
+    record = { resetAt: now + PERIOD_MS, ban: 0, kick: 0, mute: 0, warn: 0 };
     store[userId] = record;
     saveStore();
   }
+  if (typeof record.warn !== 'number') record.warn = 0;
   return record;
 }
 
@@ -170,7 +207,7 @@ const client = new Client({
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.MessageContent,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message],
 });
 
 function getRank(member) {
@@ -220,10 +257,10 @@ function errorEmbed(description) {
   return infoEmbed('Error', description, 0xed4245);
 }
 
-async function sendLog(guild, embed) {
-  if (!LOG_CHANNEL_ID) return;
+async function sendLog(guild, embed, channelId = LOG_CHANNEL_ID) {
+  if (!channelId) return;
   try {
-    const channel = await guild.channels.fetch(LOG_CHANNEL_ID);
+    const channel = await guild.channels.fetch(channelId);
     if (channel && channel.isTextBased()) {
       await channel.send({ embeds: [embed] });
     }
@@ -274,7 +311,7 @@ function checkTarget(guild, moderatorMember, moderatorRank, target, type) {
   if (target.id === guild.ownerId) return 'This user is protected and cannot be moderated.';
 
   if (!target.member) {
-    if (type === 'kick' || type === 'mute') return 'This user is not a member of the server.';
+    if (type === 'kick' || type === 'mute' || type === 'warn') return 'This user is not a member of the server.';
     return null; // ban by ID for a user who is not in the server
   }
 
@@ -372,7 +409,7 @@ function runLimitedAction({ message, rank, type, target, reason, perform }) {
     const usage = unlimited ? 'Unlimited' : `${record[type]}/${limit}`;
     const embed = infoEmbed(
       `${ACTION_LABELS[type]} Successful`,
-      `${target.tag || target.id} has been ${type === 'ban' ? 'banned' : type === 'kick' ? 'kicked' : 'muted'}.\n\n` +
+      `${target.tag || target.id} has been ${ACTION_PAST[type]}.\n\n` +
         `**Reason:** ${reason}\n**${ACTION_PLURALS[type]} used:** ${usage}` +
         (unlimited ? '' : `\n**Next reset:** <t:${resetTimestamp(record)}:R>`),
       0x57f287
@@ -477,6 +514,43 @@ async function handleMute(message, args, rank) {
   });
 }
 
+async function handleWarn(message, args, rank) {
+  const target = await resolveTarget(message.guild, args[0]);
+  const reason = args.slice(1).join(' ').trim();
+  if (!target || !reason) {
+    return message.reply({
+      embeds: [errorEmbed('Usage: `?warn <user mention or ID> <reason>` (a reason is required)')],
+    });
+  }
+
+  const problem = checkTarget(message.guild, message.member, rank, target, 'warn');
+  if (problem) return message.reply({ embeds: [errorEmbed(problem)] });
+
+  const targetInfo = { id: target.id, tag: target.user ? target.user.tag : null };
+  return runLimitedAction({
+    message,
+    rank,
+    type: 'warn',
+    target: targetInfo,
+    reason,
+    perform: async () => {
+      addWarning(target.id, message.author.id, reason);
+      // Notify the member. A closed DM never makes the warning fail.
+      await target.user
+        .send({
+          embeds: [
+            infoEmbed(
+              'You have received a warning',
+              `**Server:** ${message.guild.name}\n**Reason:** ${reason}`,
+              0xfee75c
+            ),
+          ],
+        })
+        .catch(() => {});
+    },
+  });
+}
+
 // Unban and unmute never consume an allowance.
 async function handleUnban(message, args) {
   const id = parseUserId(args[0]);
@@ -553,14 +627,14 @@ async function handleLimits(message, args, rank) {
       embeds: [
         infoEmbed(
           title,
-          `**${subjectRank.name}**\n\n- Bans: Unlimited\n- Kicks: Unlimited\n- Mutes: Unlimited`
+          `**${subjectRank.name}**\n\n- Bans: Unlimited\n- Kicks: Unlimited\n- Mutes: Unlimited\n- Warns: Unlimited`
         ),
       ],
     });
   }
 
   const record = getRecord(subjectMember.id);
-  const lines = ['ban', 'kick', 'mute']
+  const lines = ['ban', 'kick', 'mute', 'warn']
     .map((type) => `- ${ACTION_PLURALS[type]}: ${record[type]}/${formatLimit(subjectRank.limits[type])} used`)
     .join('\n');
 
@@ -579,6 +653,7 @@ async function handleHelp(message, rank) {
     '`?ban <@user or ID> [reason]` - Ban a user (uses a ban)',
     '`?kick <@user or ID> [reason]` - Kick a member (uses a kick)',
     '`?mute <@user or ID> <duration> [reason]` - Mute a member (uses a mute)',
+    '`?warn <@user or ID> <reason>` - Warn a member (uses a warn)',
     '`?unban <user ID> [reason]` - Unban a user',
     '`?unmute <@user or ID> [reason]` - Remove a mute',
     '`?limits` - Show your moderation limits and next reset',
@@ -612,7 +687,7 @@ client.on('messageCreate', async (message) => {
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
     const command = (args.shift() || '').toLowerCase();
 
-    const known = ['ban', 'kick', 'mute', 'unban', 'unmute', 'limits', 'help'];
+    const known = ['ban', 'kick', 'mute', 'unban', 'unmute', 'limits', 'help', 'warn'];
     if (!known.includes(command)) return;
 
     // Make sure the member and their roles are fresh.
@@ -639,6 +714,8 @@ client.on('messageCreate', async (message) => {
         return await handleKick(message, args, rank);
       case 'mute':
         return await handleMute(message, args, rank);
+      case 'warn':
+        return await handleWarn(message, args, rank);
       case 'unban':
         return await handleUnban(message, args);
       case 'unmute':
@@ -656,6 +733,95 @@ client.on('messageCreate', async (message) => {
 /* ------------------------------------------------------------------ */
 /* Startup                                                             */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Message logs                                                        */
+/* ------------------------------------------------------------------ */
+
+function truncate(text, max = 1000) {
+  if (!text) return '(no text content)';
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function describeAuthor(author) {
+  return author ? `<@${author.id}> (${author.tag}, ${author.id})` : 'Unknown (message was not cached)';
+}
+
+function attachmentList(message) {
+  if (!message.attachments || message.attachments.size === 0) return null;
+  return truncate([...message.attachments.values()].map((a) => a.url).join('\n'));
+}
+
+client.on('messageDelete', async (message) => {
+  try {
+    if (!message.guild || message.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+    if (message.author && message.author.bot) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Deleted')
+      .setColor(0xed4245)
+      .addFields(
+        { name: 'Author', value: describeAuthor(message.author) },
+        { name: 'Channel', value: `<#${message.channelId}>` },
+        { name: 'Content', value: truncate(message.content) }
+      )
+      .setTimestamp();
+    const files = attachmentList(message);
+    if (files) embed.addFields({ name: 'Attachments', value: files });
+
+    await sendLog(message.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageDelete] Unexpected error:', error.message);
+  }
+});
+
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  try {
+    if (newMessage.partial) await newMessage.fetch().catch(() => null);
+    if (!newMessage.guild || newMessage.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+    if (newMessage.author && newMessage.author.bot) return;
+    if (oldMessage.content === newMessage.content) return; // embeds or pins, not an edit
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Edited')
+      .setColor(0xfee75c)
+      .addFields(
+        { name: 'Author', value: describeAuthor(newMessage.author) },
+        { name: 'Channel', value: `<#${newMessage.channelId}> ([jump to message](${newMessage.url}))` },
+        { name: 'Before', value: truncate(oldMessage.content) },
+        { name: 'After', value: truncate(newMessage.content) }
+      )
+      .setTimestamp();
+
+    await sendLog(newMessage.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageUpdate] Unexpected error:', error.message);
+  }
+});
+
+// Optional: log every message that is sent (LOG_ALL_MESSAGES=true).
+client.on('messageCreate', async (message) => {
+  try {
+    if (!LOG_ALL_MESSAGES) return;
+    if (!message.guild || message.author.bot || message.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Sent')
+      .setColor(0x5865f2)
+      .addFields(
+        { name: 'Author', value: describeAuthor(message.author) },
+        { name: 'Channel', value: `<#${message.channelId}> ([jump to message](${message.url}))` },
+        { name: 'Content', value: truncate(message.content) }
+      )
+      .setTimestamp();
+    const files = attachmentList(message);
+    if (files) embed.addFields({ name: 'Attachments', value: files });
+
+    await sendLog(message.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageCreate log] Unexpected error:', error.message);
+  }
+});
 
 // Minimal HTTP server so Render detects an open port (Web Service hosting).
 const PORT = process.env.PORT || 3000;
@@ -680,4 +846,5 @@ if (!TOKEN) {
 }
 
 loadStore();
+loadWarnings();
 client.login(TOKEN);
