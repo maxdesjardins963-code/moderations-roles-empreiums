@@ -16,7 +16,7 @@ const {
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const SPAWN_INTERVAL_MS = 3.5 * 60 * 1000; // a country every 3 minutes 30
+const SPAWN_INTERVAL_MS = (7 * 60 + 30) * 1000; // a country every 7 minutes 30
 const FARM_COOLDOWN_MS = 60 * 1000; // 1 farm per minute
 const MAX_MASTERY = 50;
 const MASTERED_NEEDED = 3; // countries at mastery 50 needed to redeem
