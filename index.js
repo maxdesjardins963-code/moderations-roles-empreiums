@@ -28,13 +28,13 @@ const MESSAGE_LOG_CHANNEL_ID = process.env.MESSAGE_LOG_CHANNEL_ID || '1564665733
 // Set LOG_ALL_MESSAGES=true to also log every message that is sent.
 const LOG_ALL_MESSAGES = String(process.env.LOG_ALL_MESSAGES || '').toLowerCase() === 'true';
 
-// Stored warnings (kept separately from the limit counters).
-const WARNINGS_FILE = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'warnings.json');
-
 // Persistent storage location. On hosts with an ephemeral filesystem
 // (for example Render without a disk), point DATA_DIR to a persistent disk.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'limits.json');
+
+// Stored warnings (kept separately from the limit counters).
+const WARNINGS_FILE = path.join(DATA_DIR, 'warnings.json');
 
 // Staff ranks, highest first. Identified by configured role IDs, never by name.
 const RANK_DEFINITIONS = [
@@ -224,11 +224,6 @@ function hasExtraStaffRole(member) {
 
 function formatLimit(value) {
   return value === Infinity ? 'Unlimited' : String(value);
-}
-
-function usageString(record, rank, type) {
-  const limit = rank.limits[type];
-  return limit === Infinity ? `${record[type]}/Unlimited` : `${record[type]}/${limit}`;
 }
 
 function parseUserId(arg) {
@@ -731,10 +726,6 @@ client.on('messageCreate', async (message) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Startup                                                             */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
 /* Message logs                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -823,6 +814,10 @@ client.on('messageCreate', async (message) => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* Startup                                                             */
+/* ------------------------------------------------------------------ */
+
 // Minimal HTTP server so Render detects an open port (Web Service hosting).
 const PORT = process.env.PORT || 3000;
 http
@@ -844,6 +839,10 @@ if (!TOKEN) {
   console.error('Missing TOKEN environment variable.');
   process.exit(1);
 }
+
+// Country collecting game (slash commands, spawns in its own channel).
+// Needs countries.js in the same folder as this file.
+require('./countries').init(client, { dataDir: DATA_DIR });
 
 loadStore();
 loadWarnings();
