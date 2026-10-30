@@ -8,6 +8,7 @@ const {
   ButtonStyle,
   EmbedBuilder,
   MessageFlags,
+  PermissionFlagsBits,
   SlashCommandBuilder,
 } = require('discord.js');
 
@@ -288,17 +289,106 @@ const commandDefinitions = [
 
 const GAME_COMMANDS = new Set(['collection', 'farm', 'redeem', 'leaderboard']);
 
+// Registers the slash commands, then verifies the whole setup and reports it
+// in the Render logs (and in the LOG_CHANNEL_ID channel when it is configured).
 async function registerCommands(client) {
-  try {
-    if (GUILD_ID) {
-      const guild = await client.guilds.fetch(GUILD_ID);
-      await guild.commands.set(commandDefinitions);
+  const checks = [];
+  const add = (ok, text) => checks.push({ ok, text });
+  const expected = commandDefinitions.map((c) => c.name);
+
+  // 1. GUILD_ID
+  let guild = null;
+  if (!GUILD_ID) {
+    add(false, 'GUILD_ID is not set. Commands are registered globally and can take up to an hour to appear.');
+  } else {
+    guild = await client.guilds.fetch(GUILD_ID).catch(() => null);
+    if (guild) {
+      add(true, `GUILD_ID is set and the bot is in the server "${guild.name}" (${GUILD_ID}).`);
     } else {
-      await client.application.commands.set(commandDefinitions);
+      add(false, `GUILD_ID (${GUILD_ID}) does not match a server the bot is in. Falling back to global registration.`);
     }
-    console.log('[countries] Slash commands registered.');
+  }
+
+  // 2. Registration
+  const manager = guild ? guild.commands : client.application.commands;
+  const scope = guild ? 'server' : 'global';
+  try {
+    await manager.set(commandDefinitions);
+    const fetched = await manager.fetch();
+    const names = [...fetched.values()].map((c) => c.name);
+    const missing = expected.filter((name) => !names.includes(name));
+    if (missing.length === 0) {
+      add(true, `All ${expected.length} slash commands are registered (${scope}): ${expected.map((n) => `/${n}`).join(', ')}.`);
+    } else {
+      add(false, `Missing slash commands (${scope}): ${missing.map((n) => `/${n}`).join(', ')}.`);
+    }
   } catch (error) {
-    console.error('[countries] Could not register slash commands:', error.message);
+    add(false, `Could not register slash commands (${scope}): ${error.message}. If this says Missing Access, re-invite the bot with the applications.commands scope.`);
+  }
+
+  // 3. Game channel
+  const channel = await client.channels.fetch(COUNTRY_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased() || !channel.guild) {
+    add(false, `Game channel ${COUNTRY_CHANNEL_ID} was not found or is not a text channel the bot can see.`);
+  } else {
+    const checkGuild = guild || channel.guild;
+    if (GUILD_ID && channel.guild.id !== GUILD_ID) {
+      add(false, `The game channel is in "${channel.guild.name}", which is not the server of GUILD_ID.`);
+    }
+    const me = channel.guild.members.me || (await channel.guild.members.fetchMe().catch(() => null));
+    const perms = me ? channel.permissionsFor(me) : null;
+    const needed = [
+      ['ViewChannel', PermissionFlagsBits.ViewChannel],
+      ['SendMessages', PermissionFlagsBits.SendMessages],
+      ['EmbedLinks', PermissionFlagsBits.EmbedLinks],
+    ];
+    const lacking = perms ? needed.filter(([, flag]) => !perms.has(flag)).map(([name]) => name) : needed.map(([name]) => name);
+    if (lacking.length === 0) {
+      add(true, `Game channel #${channel.name} is reachable and the bot can post embeds there.`);
+    } else {
+      add(false, `In #${channel.name} the bot lacks: ${lacking.join(', ')}.`);
+    }
+
+    // 4. Reward role
+    if (!EMBED_PERMS_ROLE_ID) {
+      add(false, 'EMBED_PERMS_ROLE_ID is not set. /redeem cannot give the reward role.');
+    } else {
+      const role = await checkGuild.roles.fetch(EMBED_PERMS_ROLE_ID).catch(() => null);
+      if (!role) {
+        add(false, `Role ${EMBED_PERMS_ROLE_ID} (EMBED_PERMS_ROLE_ID) was not found in "${checkGuild.name}".`);
+      } else if (!me || !me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+        add(false, `The bot lacks the Manage Roles permission, so it cannot give "${role.name}".`);
+      } else if (me.roles.highest.position <= role.position) {
+        add(false, `The bot's highest role is not above "${role.name}". Move the bot role higher in Server Settings > Roles.`);
+      } else {
+        add(true, `Reward role "${role.name}" exists and the bot can give it.`);
+      }
+    }
+  }
+
+  // Report
+  const allOk = checks.every((c) => c.ok);
+  console.log(`[countries] Startup check: ${allOk ? 'everything is fine' : 'PROBLEMS FOUND'}`);
+  for (const c of checks) console.log(`[countries] ${c.ok ? 'OK     ' : 'PROBLEM'} ${c.text}`);
+
+  const logChannelId = process.env.LOG_CHANNEL_ID;
+  if (logChannelId) {
+    try {
+      const logChannel = await client.channels.fetch(logChannelId);
+      if (logChannel && logChannel.isTextBased()) {
+        await logChannel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`Country Game Startup Check: ${allOk ? 'OK' : 'Problems found'}`)
+              .setColor(allOk ? 0x57f287 : 0xed4245)
+              .setDescription(checks.map((c) => `**${c.ok ? 'OK' : 'PROBLEM'}:** ${c.text}`).join('\n').slice(0, 4000))
+              .setTimestamp(),
+          ],
+        });
+      }
+    } catch (error) {
+      console.error('[countries] Could not post the startup check in the log channel:', error.message);
+    }
   }
 }
 
