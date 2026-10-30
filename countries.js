@@ -1789,3 +1789,6 @@ function init(client, { dataDir }) {
 }
 
 module.exports = { init, COUNTRIES };
+client.once('ready', () => {
+    startCountrySpawnSystem();
+});
