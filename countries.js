@@ -16,7 +16,7 @@ const {
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const SPAWN_INTERVAL_MS = (7 * 60 + 30) * 1000; // One country spawns every 7 minutes and 30 seconds
+const SPAWN_INTERVAL_MS = 5 * 1000; // One country spawns every 5 seconds
 const FARM_COOLDOWN_MS = 60 * 1000; // 1 farm par minute
 const WAR_COOLDOWN_MS = 5 * 60 * 1000; // One war every 5 minutes
 const REQUEST_TTL_MS = 5 * 60 * 1000; // Trade, alliance, and faction requests expire after 5 minutes
