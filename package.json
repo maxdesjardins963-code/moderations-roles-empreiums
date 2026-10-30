@@ -1,7 +1,7 @@
 {
   "name": "discord-moderation-bot",
   "version": "1.0.0",
-  "description": "Discord moderation bot with role-based moderation limits and a fixed 10-hour reset period.",
+  "description": "Discord moderation bot with staff limits, message logs and a country collecting game",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,8 +10,7 @@
     "node": ">=18.17.0"
   },
   "dependencies": {
-    "discord.js": "^14.16.3",
+    "discord.js": "^14.22.1",
     "dotenv": "^16.4.5"
-  },
-  "license": "MIT"
+  }
 }
