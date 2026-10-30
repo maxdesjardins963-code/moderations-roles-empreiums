@@ -1,540 +1,850 @@
 'use strict';
 
+require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+  Client,
+  GatewayIntentBits,
+  Partials,
   EmbedBuilder,
-  MessageFlags,
-  SlashCommandBuilder,
 } = require('discord.js');
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
 /* ------------------------------------------------------------------ */
 
-const SPAWN_INTERVAL_MS = 3.5 * 60 * 1000; // a country every 3 minutes 30
-const FARM_COOLDOWN_MS = 60 * 1000; // 1 farm per minute
-const MAX_MASTERY = 50;
-const MASTERED_NEEDED = 3; // countries at mastery 50 needed to redeem
-const DUPLICATE_BONUS = 5; // mastery gained when you claim a country you already own
+const PREFIX = '?';
+const PERIOD_MS = 10 * 60 * 60 * 1000; // fixed 10-hour period
+const MAX_TIMEOUT_MS = 28 * 24 * 60 * 60 * 1000; // Discord timeout cap
 
-// The only channel where the game happens (spawns, claims and slash commands).
-const COUNTRY_CHANNEL_ID = process.env.COUNTRY_CHANNEL_ID || '1565678201315790848';
-const EMBED_PERMS_ROLE_ID = process.env.EMBED_PERMS_ROLE_ID; // role given by /redeem
-const GUILD_ID = process.env.GUILD_ID; // optional: instant slash command registration
+const TOKEN = process.env.TOKEN;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 
-/* ------------------------------------------------------------------ */
-/* The 100 countries of 1750: [name, emoji, trade %, sociable %]       */
-/* Rarity is computed from trade + sociable.                           */
-/* ------------------------------------------------------------------ */
+// Channel for message logs (deleted and edited messages).
+const MESSAGE_LOG_CHANNEL_ID = process.env.MESSAGE_LOG_CHANNEL_ID || '1564665733114236988';
+// Set LOG_ALL_MESSAGES=true to also log every message that is sent.
+const LOG_ALL_MESSAGES = String(process.env.LOG_ALL_MESSAGES || '').toLowerCase() === 'true';
 
-const RAW_COUNTRIES = [
-  ['Kingdom of France', '🥖', 80, 85],
-  ['Great Britain', '☕', 90, 70],
-  ['Dutch Republic', '🌷', 95, 75],
-  ['Spain', '🐂', 75, 60],
-  ['Portugal', '⛵', 85, 65],
-  ['Ottoman Empire', '🕌', 85, 70],
-  ['Qing China', '🏯', 85, 55],
-  ['Mughal Empire', '🐘', 80, 60],
-  ['Russian Empire', '🐻', 55, 45],
-  ['Prussia', '🦅', 50, 40],
-  ['Habsburg Austria', '🎻', 60, 75],
-  ['Sweden', '🪓', 55, 50],
-  ['Denmark-Norway', '⚓', 70, 55],
-  ['Republic of Venice', '🎭', 90, 80],
-  ['Republic of Genoa', '⚖️', 80, 60],
-  ['Papal States', '⛪', 45, 70],
-  ['Poland-Lithuania', '🏇', 55, 65],
-  ['Persia', '🦁', 65, 50],
-  ['Tokugawa Japan', '🌸', 40, 35],
-  ['Joseon Korea', '🎎', 30, 40],
-  ['Siam', '🛕', 60, 65],
-  ['Konbaung Burma', '🐅', 45, 40],
-  ['Dai Viet', '🐉', 50, 55],
-  ['Morocco', '🏜️', 60, 55],
-  ['Ethiopia', '⛰️', 35, 50],
-  ['Ashanti Empire', '🥁', 70, 60],
-  ['Dahomey', '🗡️', 60, 35],
-  ['Oyo Empire', '🐎', 65, 55],
-  ['Kingdom of Kongo', '🌴', 55, 60],
-  ['Kingdom of Benin', '🗿', 70, 55],
-  ['Bornu Empire', '🐪', 60, 45],
-  ['New France', '🦫', 70, 65],
-  ['New Spain', '🌮', 75, 60],
-  ['Viceroyalty of Peru', '⛏️', 80, 50],
-  ['Portuguese Brazil', '🦜', 75, 55],
-  ['Thirteen Colonies', '🔔', 65, 70],
-  ['Iroquois Confederacy', '🏹', 45, 80],
-  ['Cherokee Nation', '🪶', 40, 70],
-  ['Comanche', '🐴', 35, 45],
-  ['Kingdom of Naples', '🍕', 55, 80],
-  ['Tuscany', '🍷', 65, 75],
-  ['Savoy-Sardinia', '🏔️', 40, 50],
-  ['Bavaria', '🍺', 45, 70],
-  ['Saxony', '🎨', 50, 60],
-  ['Hanover', '🌲', 45, 50],
-  ['Hesse-Kassel', '🛡️', 35, 40],
-  ['Swiss Confederacy', '🧀', 55, 75],
-  ['Knights of Malta', '✝️', 60, 55],
-  ['Courland', '🌊', 50, 45],
-  ['Crimean Khanate', '🐺', 40, 35],
-  ['Cossack Hetmanate', '🪕', 35, 60],
-  ['Georgia', '🍇', 40, 65],
-  ['Khiva Khanate', '🏺', 45, 40],
-  ['Bukhara Emirate', '🧿', 60, 50],
-  ['Oman', '🌶️', 75, 50],
-  ['Yemen', '🪔', 55, 45],
-  ['Swahili Coast', '🧭', 70, 55],
-  ['Mutapa', '🪙', 55, 40],
-  ['Rozvi Empire', '🏛️', 50, 40],
-  ['Lunda Empire', '🛖', 45, 55],
-  ['Bambara Empire', '🌾', 45, 45],
-  ['Fouta Djallon', '📿', 40, 55],
-  ['Sennar Sultanate', '🐫', 55, 40],
-  ['Darfur', '🌵', 40, 45],
-  ['Merina Madagascar', '🌺', 45, 60],
-  ['Hawaii', '🌋', 35, 75],
-  ['Tahiti', '🥥', 30, 85],
-  ['Aotearoa Maori', '🛶', 25, 55],
-  ['Aboriginal Australia', '🪃', 20, 65],
-  ['Maratha Confederacy', '🚩', 65, 60],
-  ['Gorkha Nepal', '🕉️', 40, 50],
-  ['Bhutan', '🐲', 25, 45],
-  ['Tibet', '🪷', 30, 60],
-  ['Dzungar Khanate', '🐎', 40, 35],
-  ['Ryukyu Kingdom', '🐚', 80, 70],
-  ['Kingdom of Kandy', '🍃', 50, 55],
-  ['Aceh', '🌿', 70, 50],
-  ['Mataram Java', '🪘', 60, 60],
-  ['Sulu Sultanate', '🏴‍☠️', 65, 40],
-  ['Brunei', '🪵', 55, 50],
-  ['Lan Xang Laos', '🍚', 45, 60],
-  ['Cambodia', '🌅', 40, 50],
-  ['Wallachia', '🧛', 45, 50],
-  ['Moldavia', '🦬', 40, 55],
-  ['Republic of Ragusa', '🏰', 85, 75],
-  ['Free City of Hamburg', '🚢', 85, 65],
-  ['Bremen and the Hansa', '🧂', 80, 60],
-  ['Kingdom of Ireland', '🍀', 45, 85],
-  ['Scotland', '🥃', 45, 80],
-  ['Iceland', '🧊', 25, 55],
-  ['Greenland Inuit', '❄️', 20, 60],
-  ['Louisiana', '🎷', 55, 70],
-  ['Spanish Cuba', '🚬', 70, 70],
-  ['Jamaica', '🍹', 75, 65],
-  ['Saint-Domingue', '🍬', 85, 40],
-  ['Barbados', '🍠', 70, 55],
-  ['Rio de la Plata', '🧉', 55, 55],
-  ['Mapuche Araucania', '🔥', 25, 50],
-  ['Guarani Missions', '🎶', 40, 70],
-  ['Mosquito Coast', '🦈', 40, 45],
+// Stored warnings (kept separately from the limit counters).
+const WARNINGS_FILE = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'warnings.json');
+
+// Persistent storage location. On hosts with an ephemeral filesystem
+// (for example Render without a disk), point DATA_DIR to a persistent disk.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'limits.json');
+
+// Staff ranks, highest first. Identified by configured role IDs, never by name.
+const RANK_DEFINITIONS = [
+  {
+    key: 'owner',
+    name: 'Owner',
+    level: 5,
+    roleId: process.env.OWNER_ROLE_ID,
+    limits: { ban: Infinity, kick: Infinity, mute: Infinity, warn: Infinity },
+  },
+  {
+    key: 'supervisor',
+    name: 'Supervisor',
+    level: 4,
+    roleId: process.env.SUPERVISOR_ROLE_ID,
+    limits: { ban: 5, kick: 7, mute: 12, warn: 15 },
+  },
+  {
+    key: 'senior_moderator',
+    name: 'Senior Moderator',
+    level: 3,
+    roleId: process.env.SENIOR_MODERATOR_ROLE_ID,
+    limits: { ban: 3, kick: 5, mute: 8, warn: 10 },
+  },
+  {
+    key: 'moderator',
+    name: 'Moderator',
+    level: 2,
+    roleId: process.env.MODERATOR_ROLE_ID,
+    limits: { ban: 2, kick: 3, mute: 5, warn: 6 },
+  },
+  {
+    key: 'trial_moderator',
+    name: 'Trial Moderator',
+    level: 1,
+    roleId: process.env.TRIAL_MODERATOR_ROLE_ID,
+    limits: { ban: 1, kick: 2, mute: 3, warn: 4 },
+  },
 ];
 
-function slugify(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
+const RANKS = RANK_DEFINITIONS.filter((rank) => {
+  if (!rank.roleId) {
+    console.warn(`[config] Missing role ID for rank "${rank.name}". This rank is disabled.`);
+    return false;
+  }
+  return true;
+});
 
-function rarityOf(trade, sociable) {
-  const total = trade + sociable;
-  if (total >= 150) return 'Legendary';
-  if (total >= 115) return 'Rare';
-  return 'Common';
-}
+// Optional: extra staff roles (for example Community Manager). Members with one of
+// these roles count as staff for ?help, but they get no moderation permissions or
+// limits from it. Comma-separated role IDs.
+const EXTRA_STAFF_ROLE_IDS = (process.env.EXTRA_STAFF_ROLE_IDS || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
 
-const COUNTRIES = RAW_COUNTRIES.map(([name, emoji, trade, sociable]) => ({
-  id: slugify(name),
-  name,
-  emoji,
-  trade,
-  sociable,
-  rarity: rarityOf(trade, sociable),
-}));
+// Optional: extra roles that can never be targeted by moderation commands.
+const PROTECTED_ROLE_IDS = (process.env.PROTECTED_ROLE_IDS || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
 
-const BY_ID = new Map(COUNTRIES.map((c) => [c.id, c]));
-
-// Spawn weights per rarity tier (Legendary countries are the hardest to see).
-const RARITY_WEIGHTS = { Common: 60, Rare: 30, Legendary: 10 };
-const RARITY_COLORS = { Common: 0x95a5a6, Rare: 0x3498db, Legendary: 0xf1c40f };
-
-function pickCountry() {
-  const roll = Math.random() * 100;
-  let tier = 'Common';
-  if (roll >= RARITY_WEIGHTS.Common + RARITY_WEIGHTS.Rare) tier = 'Legendary';
-  else if (roll >= RARITY_WEIGHTS.Common) tier = 'Rare';
-  const pool = COUNTRIES.filter((c) => c.rarity === tier);
-  const list = pool.length ? pool : COUNTRIES;
-  return list[Math.floor(Math.random() * list.length)];
-}
+const ACTION_LABELS = { ban: 'Ban', kick: 'Kick', mute: 'Mute', warn: 'Warn' };
+const ACTION_PLURALS = { ban: 'Bans', kick: 'Kicks', mute: 'Mutes', warn: 'Warns' };
+const ACTION_PAST = { ban: 'banned', kick: 'kicked', mute: 'muted', warn: 'warned' };
 
 /* ------------------------------------------------------------------ */
 /* Persistent storage                                                  */
 /* ------------------------------------------------------------------ */
 
-let dataFile;
-let store = { users: {} };
+let store = {};
 
 function loadStore() {
   try {
-    store = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-    if (!store || typeof store !== 'object' || typeof store.users !== 'object') throw new Error('Invalid format');
+    store = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    if (typeof store !== 'object' || store === null || Array.isArray(store)) {
+      throw new Error('Invalid store format');
+    }
   } catch (error) {
-    if (error.code !== 'ENOENT') console.error('[countries] Could not read the data file.', error.message);
-    store = { users: {} };
+    if (error.code !== 'ENOENT') {
+      console.error('[storage] Could not read the limits file. Starting from an empty store.', error.message);
+      try {
+        fs.copyFileSync(DATA_FILE, `${DATA_FILE}.corrupt-${Date.now()}`);
+      } catch (_) {
+        /* ignore backup failure */
+      }
+    }
+    store = {};
   }
 }
 
+// Atomic write: write to a temporary file, then rename over the real one.
 function saveStore() {
-  fs.mkdirSync(path.dirname(dataFile), { recursive: true });
-  const tmp = `${dataFile}.tmp`;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = `${DATA_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
-  fs.renameSync(tmp, dataFile);
+  fs.renameSync(tmp, DATA_FILE);
 }
 
-function getUser(userId) {
-  if (!store.users[userId]) store.users[userId] = { countries: {}, lastFarm: 0, redeemed: false };
-  return store.users[userId];
+let warnings = {};
+
+function loadWarnings() {
+  try {
+    warnings = JSON.parse(fs.readFileSync(WARNINGS_FILE, 'utf8'));
+    if (typeof warnings !== 'object' || warnings === null || Array.isArray(warnings)) {
+      throw new Error('Invalid warnings format');
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('[storage] Could not read the warnings file.', error.message);
+    warnings = {};
+  }
 }
 
-function masteredCount(user) {
-  return Object.values(user.countries).filter((m) => m >= MAX_MASTERY).length;
+function saveWarnings() {
+  fs.mkdirSync(path.dirname(WARNINGS_FILE), { recursive: true });
+  const tmp = `${WARNINGS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(warnings, null, 2));
+  fs.renameSync(tmp, WARNINGS_FILE);
+}
+
+function addWarning(targetId, moderatorId, reason) {
+  if (!Array.isArray(warnings[targetId])) warnings[targetId] = [];
+  warnings[targetId].push({ moderatorId, reason, timestamp: Date.now() });
+  saveWarnings();
+}
+
+// Returns the staff member's record, starting a new 10-hour period when needed.
+function getRecord(userId) {
+  const now = Date.now();
+  let record = store[userId];
+  if (!record || typeof record.resetAt !== 'number' || now >= record.resetAt) {
+    record = { resetAt: now + PERIOD_MS, ban: 0, kick: 0, mute: 0, warn: 0 };
+    store[userId] = record;
+    saveStore();
+  }
+  if (typeof record.warn !== 'number') record.warn = 0;
+  return record;
+}
+
+function resetTimestamp(record) {
+  return Math.floor(record.resetAt / 1000);
 }
 
 /* ------------------------------------------------------------------ */
-/* Embeds                                                              */
+/* Per-moderator lock (prevents race conditions)                       */
 /* ------------------------------------------------------------------ */
 
-function bar(value, max = MAX_MASTERY, size = 10) {
-  const filled = Math.round((Math.min(value, max) / max) * size);
-  return `${'#'.repeat(filled)}${'-'.repeat(size - filled)}`;
+const locks = new Map();
+
+function withLock(key, task) {
+  const previous = locks.get(key) || Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const tail = run.catch(() => {});
+  locks.set(key, tail);
+  tail.then(() => {
+    if (locks.get(key) === tail) locks.delete(key);
+  });
+  return run;
 }
 
-function spawnEmbed(country, state, winnerId) {
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Channel, Partials.Message],
+});
+
+function getRank(member) {
+  if (!member) return null;
+  for (const rank of RANKS) {
+    if (member.roles.cache.has(rank.roleId)) return rank;
+  }
+  return null;
+}
+
+function hasExtraStaffRole(member) {
+  return EXTRA_STAFF_ROLE_IDS.some((roleId) => member.roles.cache.has(roleId));
+}
+
+function formatLimit(value) {
+  return value === Infinity ? 'Unlimited' : String(value);
+}
+
+function usageString(record, rank, type) {
+  const limit = rank.limits[type];
+  return limit === Infinity ? `${record[type]}/Unlimited` : `${record[type]}/${limit}`;
+}
+
+function parseUserId(arg) {
+  if (!arg) return null;
+  const match = arg.match(/^<@!?(\d{17,20})>$/) || arg.match(/^(\d{17,20})$/);
+  return match ? match[1] : null;
+}
+
+function parseDuration(arg) {
+  if (!arg) return null;
+  const match = arg.match(/^(\d+)(s|m|h|d)$/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const multipliers = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 };
+  const ms = value * multipliers[unit];
+  if (ms < 1000 || ms > MAX_TIMEOUT_MS) return null;
+  return ms;
+}
+
+function infoEmbed(title, description, color = 0x2b2d31) {
+  return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
+}
+
+function errorEmbed(description) {
+  return infoEmbed('Error', description, 0xed4245);
+}
+
+async function sendLog(guild, embed, channelId = LOG_CHANNEL_ID) {
+  if (!channelId) return;
+  try {
+    const channel = await guild.channels.fetch(channelId);
+    if (channel && channel.isTextBased()) {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.error('[logs] Could not send a log message:', error.message);
+  }
+}
+
+function buildLogEmbed({ title, color, moderator, rank, type, target, usage, status, reason, record }) {
   const embed = new EmbedBuilder()
-    .setColor(RARITY_COLORS[country.rarity])
-    .setTitle(`${country.emoji} A wild country appeared: ${country.name}`)
-    .setDescription(
-      `*The year is 1750. Envoys of **${country.name}** are at your gates.*\n\n` +
-        `**Rarity:** ${country.rarity}\n` +
-        `**Trade:** ${country.trade}%\n` +
-        `**Sociable:** ${country.sociable}%`
-    );
-  if (state === 'open') embed.setFooter({ text: 'The first member to press the button wins this country.' });
-  if (state === 'claimed') embed.addFields({ name: 'Claimed by', value: `<@${winnerId}>` });
-  if (state === 'expired') embed.setFooter({ text: 'Nobody claimed it. The envoys sailed away.' });
+    .setTitle(title)
+    .setColor(color)
+    .addFields(
+      { name: 'Moderator', value: `<@${moderator.id}> (${moderator.username}, ${moderator.id})` },
+      { name: 'Rank', value: rank.name, inline: true },
+      { name: 'Action', value: ACTION_LABELS[type], inline: true },
+      { name: 'Usage', value: usage, inline: true },
+      { name: 'Status', value: status, inline: true }
+    )
+    .setTimestamp();
+
+  if (target) embed.addFields({ name: 'Target', value: `${target.tag || 'Unknown user'} (${target.id})` });
+  if (reason) embed.addFields({ name: 'Reason', value: reason });
+  if (record && rank.limits[type] !== Infinity) {
+    embed.addFields({ name: 'Next reset', value: `<t:${resetTimestamp(record)}:R>` });
+  }
   return embed;
 }
 
-function claimRow(spawnId, disabled) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`claim:${spawnId}`)
-      .setLabel('Claim this country')
-      .setEmoji('🏳️')
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(disabled)
-  );
-}
-
 /* ------------------------------------------------------------------ */
-/* Spawner                                                             */
+/* Target validation (hierarchy and protection checks)                 */
 /* ------------------------------------------------------------------ */
 
-let current = null; // { id, country, claimed, message }
-
-async function expireCurrent() {
-  if (!current || current.claimed) return;
-  current.claimed = true;
-  await current.message
-    .edit({ embeds: [spawnEmbed(current.country, 'expired')], components: [claimRow(current.id, true)] })
-    .catch(() => {});
+async function resolveTarget(guild, arg) {
+  const id = parseUserId(arg);
+  if (!id) return null;
+  const member = await guild.members.fetch(id).catch(() => null);
+  let user = member ? member.user : null;
+  if (!user) user = await client.users.fetch(id).catch(() => null);
+  return { id, member, user };
 }
 
-async function spawn(client) {
-  try {
-    if (!COUNTRY_CHANNEL_ID) return;
-    const channel = await client.channels.fetch(COUNTRY_CHANNEL_ID).catch(() => null);
-    if (!channel || !channel.isTextBased()) return;
+// Returns an error string, or null when the target is valid.
+// The same checks apply whether the target was given as a mention or a raw ID.
+function checkTarget(guild, moderatorMember, moderatorRank, target, type) {
+  if (target.id === moderatorMember.id) return 'You cannot moderate yourself.';
+  if (target.id === client.user.id) return 'You cannot moderate the bot.';
+  if (target.id === guild.ownerId) return 'This user is protected and cannot be moderated.';
 
-    await expireCurrent();
-
-    const country = pickCountry();
-    const id = String(Date.now());
-    const message = await channel.send({
-      embeds: [spawnEmbed(country, 'open')],
-      components: [claimRow(id, false)],
-    });
-    current = { id, country, claimed: false, message };
-  } catch (error) {
-    console.error('[countries] Spawn failed:', error.message);
+  if (!target.member) {
+    if (type === 'kick' || type === 'mute' || type === 'warn') return 'This user is not a member of the server.';
+    return null; // ban by ID for a user who is not in the server
   }
+
+  const member = target.member;
+
+  if (PROTECTED_ROLE_IDS.some((roleId) => member.roles.cache.has(roleId))) {
+    return 'This user is protected and cannot be moderated.';
+  }
+
+  const targetRank = getRank(member);
+  if (targetRank && targetRank.level >= moderatorRank.level) {
+    return 'You cannot moderate a member of equal or higher staff rank.';
+  }
+
+  const isGuildOwner = moderatorMember.id === guild.ownerId;
+  if (!isGuildOwner && moderatorMember.roles.highest.position <= member.roles.highest.position) {
+    return 'You cannot moderate a member whose highest role is equal to or above yours.';
+  }
+
+  if (type === 'ban' && !member.bannable) return 'I am not able to ban this member.';
+  if (type === 'kick' && !member.kickable) return 'I am not able to kick this member.';
+  if (type === 'mute' && !member.moderatable) return 'I am not able to mute this member.';
+
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
-/* Slash commands                                                      */
+/* Limited action runner                                               */
 /* ------------------------------------------------------------------ */
 
-const commandDefinitions = [
-  new SlashCommandBuilder().setName('collection').setDescription('Show your countries and their mastery')
-    .addUserOption((o) => o.setName('member').setDescription('Another member (optional)')),
-  new SlashCommandBuilder().setName('farm').setDescription('Farm one of your countries to raise its mastery')
-    .addStringOption((o) => o.setName('country').setDescription('The country to farm').setRequired(true).setAutocomplete(true)),
-  new SlashCommandBuilder().setName('redeem').setDescription(`Redeem the Embed Perms role (needs ${MASTERED_NEEDED} countries at mastery ${MAX_MASTERY})`),
-  new SlashCommandBuilder().setName('leaderboard').setDescription('Top collectors of the server'),
-].map((c) => c.toJSON());
+// Checks the allowance, reserves it, runs the sanction, and rolls back if it fails.
+// The whole sequence runs under a per-moderator lock so concurrent commands
+// cannot exceed a limit.
+function runLimitedAction({ message, rank, type, target, reason, perform }) {
+  const moderator = message.author;
 
-const GAME_COMMANDS = new Set(['collection', 'farm', 'redeem', 'leaderboard']);
+  return withLock(moderator.id, async () => {
+    const limit = rank.limits[type];
+    const unlimited = limit === Infinity;
+    const record = unlimited ? null : getRecord(moderator.id);
 
-async function registerCommands(client) {
-  try {
-    if (GUILD_ID) {
-      const guild = await client.guilds.fetch(GUILD_ID);
-      await guild.commands.set(commandDefinitions);
-    } else {
-      await client.application.commands.set(commandDefinitions);
+    if (!unlimited && record[type] >= limit) {
+      const usage = `${record[type]}/${limit}`;
+      const embed = infoEmbed(
+        'Moderation Limit Reached',
+        `You have reached your ${type} limit for this 10-hour period.\n\n` +
+          `**Current usage:** ${usage}\n` +
+          `**Next reset:** <t:${resetTimestamp(record)}:R>\n\n` +
+          'You may use other moderation commands if their independent limits have not been reached.',
+        0xed4245
+      );
+      await message.reply({ embeds: [embed] }).catch(() => {});
+
+      await sendLog(
+        message.guild,
+        buildLogEmbed({
+          title: 'Moderation Limit Reached',
+          color: 0xed4245,
+          moderator,
+          rank,
+          type,
+          target,
+          usage,
+          status: 'Rejected',
+          reason: `Maximum ${type} allowance reached.`,
+          record,
+        })
+      );
+      return false;
     }
-    console.log('[countries] Slash commands registered.');
-  } catch (error) {
-    console.error('[countries] Could not register slash commands:', error.message);
-  }
-}
 
-async function handleClaim(interaction) {
-  const spawnId = interaction.customId.split(':')[1];
-  if (!current || current.id !== spawnId || current.claimed) {
-    return interaction.reply({ content: 'Too late. Someone was faster, or the country already left.', flags: MessageFlags.Ephemeral });
-  }
-
-  // Close the spawn synchronously so only one member can ever win it.
-  current.claimed = true;
-  const country = current.country;
-  const user = getUser(interaction.user.id);
-  const owned = user.countries[country.id] !== undefined;
-
-  if (owned) {
-    user.countries[country.id] = Math.min(MAX_MASTERY, user.countries[country.id] + DUPLICATE_BONUS);
-  } else {
-    user.countries[country.id] = 0;
-  }
-  saveStore();
-
-  await interaction.update({
-    embeds: [spawnEmbed(country, 'claimed', interaction.user.id)],
-    components: [claimRow(spawnId, true)],
-  });
-  await interaction
-    .followUp({
-      content: owned
-        ? `You already owned **${country.name}**. Duplicate bonus: **+${DUPLICATE_BONUS} mastery** (now ${user.countries[country.id]}/${MAX_MASTERY}).`
-        : `**${country.name}** is yours. Use \`/farm\` to raise its mastery.`,
-      flags: MessageFlags.Ephemeral,
-    })
-    .catch(() => {});
-}
-
-async function handleCollection(interaction) {
-  const target = interaction.options.getUser('member') || interaction.user;
-  const user = getUser(target.id);
-  const entries = Object.entries(user.countries)
-    .map(([id, mastery]) => ({ country: BY_ID.get(id), mastery }))
-    .filter((e) => e.country)
-    .sort((a, b) => b.mastery - a.mastery);
-
-  if (!entries.length) {
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(0x2b2d31).setTitle('Collection').setDescription(`${target.username} has no country yet.`)],
-    });
-  }
-
-  const shown = entries.slice(0, 25).map(
-    ({ country, mastery }) =>
-      `${country.emoji} **${country.name}** [${bar(mastery)}] ${mastery}/${MAX_MASTERY}${mastery >= MAX_MASTERY ? ' (MASTERED)' : ''}`
-  );
-  const more = entries.length > 25 ? `\n...and ${entries.length - 25} more.` : '';
-
-  return interaction.reply({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(0x5865f2)
-        .setTitle(`Collection of ${target.username}`)
-        .setDescription(
-          `**Countries:** ${entries.length}/${COUNTRIES.length}\n` +
-            `**Mastered:** ${masteredCount(user)}/${MASTERED_NEEDED} needed for Embed Perms\n\n${shown.join('\n')}${more}`
-        ),
-    ],
-  });
-}
-
-async function handleFarm(interaction) {
-  const user = getUser(interaction.user.id);
-  const countryId = interaction.options.getString('country');
-  const country = BY_ID.get(countryId);
-
-  if (!country || user.countries[countryId] === undefined) {
-    return interaction.reply({ content: 'You do not own that country.', flags: MessageFlags.Ephemeral });
-  }
-  if (user.countries[countryId] >= MAX_MASTERY) {
-    return interaction.reply({ content: `**${country.name}** is already at mastery ${MAX_MASTERY}.`, flags: MessageFlags.Ephemeral });
-  }
-
-  const now = Date.now();
-  const wait = user.lastFarm + FARM_COOLDOWN_MS - now;
-  if (wait > 0) {
-    return interaction.reply({
-      content: `You can farm again <t:${Math.ceil((now + wait) / 1000)}:R>.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-  user.lastFarm = now;
-
-  // Trade % = chance of a double harvest. Sociable % = chance of diplomacy,
-  // which also raises another country you own.
-  let gain = 1;
-  const notes = [];
-  if (Math.random() * 100 < country.trade) {
-    gain += 1;
-    notes.push('Trade caravans doubled the harvest (+1).');
-  }
-  user.countries[countryId] = Math.min(MAX_MASTERY, user.countries[countryId] + gain);
-
-  if (Math.random() * 100 < country.sociable) {
-    const others = Object.keys(user.countries).filter((id) => id !== countryId && user.countries[id] < MAX_MASTERY);
-    if (others.length) {
-      const otherId = others[Math.floor(Math.random() * others.length)];
-      user.countries[otherId] += 1;
-      const other = BY_ID.get(otherId);
-      notes.push(`Diplomacy paid off: **${other.name}** gained +1 mastery too.`);
+    // Reserve the allowance before executing, and persist it immediately.
+    if (!unlimited) {
+      record[type] += 1;
+      saveStore();
     }
-  }
-  saveStore();
 
-  const mastery = user.countries[countryId];
-  const mastered = mastery >= MAX_MASTERY;
-  return interaction.reply({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(mastered ? 0xf1c40f : 0x57f287)
-        .setTitle(`${country.emoji} ${country.name}`)
-        .setDescription(
-          `You gained **+${gain}** mastery.\n[${bar(mastery)}] **${mastery}/${MAX_MASTERY}**` +
-            (notes.length ? `\n\n${notes.join('\n')}` : '') +
-            (mastered ? `\n\n**${country.name} is now MASTERED!** (${masteredCount(user)}/${MASTERED_NEEDED})` : '')
-        ),
-    ],
-  });
-}
-
-async function handleRedeem(interaction) {
-  const user = getUser(interaction.user.id);
-  const mastered = masteredCount(user);
-
-  if (!EMBED_PERMS_ROLE_ID) {
-    return interaction.reply({ content: 'The reward role is not configured yet.', flags: MessageFlags.Ephemeral });
-  }
-  if (mastered < MASTERED_NEEDED) {
-    return interaction.reply({
-      content: `You need **${MASTERED_NEEDED}** countries at mastery ${MAX_MASTERY}. You have **${mastered}**.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-  if (!member) return interaction.reply({ content: 'Could not find you in this server.', flags: MessageFlags.Ephemeral });
-  if (member.roles.cache.has(EMBED_PERMS_ROLE_ID)) {
-    return interaction.reply({ content: 'You already have the Embed Perms role.', flags: MessageFlags.Ephemeral });
-  }
-
-  try {
-    await member.roles.add(EMBED_PERMS_ROLE_ID, 'Redeemed with 3 mastered countries');
-  } catch (error) {
-    console.error('[countries] Could not give the role:', error.message);
-    return interaction.reply({ content: 'I could not give you the role. Please contact a staff member.', flags: MessageFlags.Ephemeral });
-  }
-  user.redeemed = true;
-  saveStore();
-
-  return interaction.reply({
-    embeds: [new EmbedBuilder().setColor(0xf1c40f).setTitle('Reward redeemed').setDescription('You now have the **Embed Perms** role. You can send GIFs, embeds and files.')],
-  });
-}
-
-async function handleLeaderboard(interaction) {
-  const rows = Object.entries(store.users)
-    .map(([id, u]) => ({ id, mastered: masteredCount(u), total: Object.keys(u.countries).length }))
-    .filter((r) => r.total > 0)
-    .sort((a, b) => b.mastered - a.mastered || b.total - a.total)
-    .slice(0, 10);
-
-  const text = rows.length
-    ? rows.map((r, i) => `**${i + 1}.** <@${r.id}> - ${r.mastered} mastered, ${r.total} countries`).join('\n')
-    : 'Nobody owns a country yet.';
-
-  return interaction.reply({
-    embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Top Collectors').setDescription(text)],
-    allowedMentions: { parse: [] },
-  });
-}
-
-async function handleAutocomplete(interaction) {
-  const focused = interaction.options.getFocused().toLowerCase();
-  const user = getUser(interaction.user.id);
-  const choices = Object.entries(user.countries)
-    .map(([id, mastery]) => ({ country: BY_ID.get(id), mastery }))
-    .filter((e) => e.country && e.mastery < MAX_MASTERY && e.country.name.toLowerCase().includes(focused))
-    .slice(0, 25)
-    .map((e) => ({ name: `${e.country.emoji} ${e.country.name} (${e.mastery}/${MAX_MASTERY})`.slice(0, 100), value: e.country.id }));
-  return interaction.respond(choices).catch(() => {});
-}
-
-/* ------------------------------------------------------------------ */
-/* Entry point                                                         */
-/* ------------------------------------------------------------------ */
-
-function init(client, { dataDir }) {
-  dataFile = path.join(dataDir, 'countries.json');
-  loadStore();
-
-  client.once('clientReady', async () => {
-    await registerCommands(client);
-    spawn(client);
-    setInterval(() => spawn(client), SPAWN_INTERVAL_MS);
-  });
-
-  client.on('interactionCreate', async (interaction) => {
     try {
-      // Everything about the game only works in the game channel.
-      const isGameInteraction =
-        ((interaction.isChatInputCommand() || interaction.isAutocomplete()) && GAME_COMMANDS.has(interaction.commandName)) ||
-        (interaction.isButton() && interaction.customId.startsWith('claim:'));
-      if (isGameInteraction && interaction.channelId !== COUNTRY_CHANNEL_ID) {
-        if (interaction.isAutocomplete()) return await interaction.respond([]).catch(() => {});
-        return await interaction.reply({
-          content: `This game only works in <#${COUNTRY_CHANNEL_ID}>.`,
-          flags: MessageFlags.Ephemeral,
-        });
-      }
-
-      if (interaction.isAutocomplete() && interaction.commandName === 'farm') return await handleAutocomplete(interaction);
-      if (interaction.isButton() && interaction.customId.startsWith('claim:')) return await handleClaim(interaction);
-      if (!interaction.isChatInputCommand() || !interaction.guild) return;
-
-      switch (interaction.commandName) {
-        case 'collection': return await handleCollection(interaction);
-        case 'farm': return await handleFarm(interaction);
-        case 'redeem': return await handleRedeem(interaction);
-        case 'leaderboard': return await handleLeaderboard(interaction);
-        default: return;
-      }
+      await perform();
     } catch (error) {
-      console.error('[countries] Interaction error:', error.message);
-      if (interaction.isRepliable && interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-        interaction.reply({ content: 'Something went wrong.', flags: MessageFlags.Ephemeral }).catch(() => {});
+      // Failed sanctions never consume an allowance.
+      if (!unlimited) {
+        record[type] = Math.max(0, record[type] - 1);
+        saveStore();
       }
+      console.error(`[${type}] Action failed:`, error.message);
+      await message
+        .reply({
+          embeds: [errorEmbed('The action could not be completed. No moderation allowance was used.')],
+        })
+        .catch(() => {});
+      return false;
     }
+
+    const usage = unlimited ? 'Unlimited' : `${record[type]}/${limit}`;
+    const embed = infoEmbed(
+      `${ACTION_LABELS[type]} Successful`,
+      `${target.tag || target.id} has been ${ACTION_PAST[type]}.\n\n` +
+        `**Reason:** ${reason}\n**${ACTION_PLURALS[type]} used:** ${usage}` +
+        (unlimited ? '' : `\n**Next reset:** <t:${resetTimestamp(record)}:R>`),
+      0x57f287
+    );
+    await message.reply({ embeds: [embed] }).catch(() => {});
+
+    await sendLog(
+      message.guild,
+      buildLogEmbed({
+        title: `Moderation Action: ${ACTION_LABELS[type]}`,
+        color: 0x57f287,
+        moderator,
+        rank,
+        type,
+        target,
+        usage,
+        status: 'Allowed',
+        reason,
+        record,
+      })
+    );
+    return true;
   });
 }
 
-module.exports = { init, COUNTRIES };
+/* ------------------------------------------------------------------ */
+/* Commands                                                            */
+/* ------------------------------------------------------------------ */
+
+async function handleBan(message, args, rank) {
+  const target = await resolveTarget(message.guild, args[0]);
+  if (!target) {
+    return message.reply({ embeds: [errorEmbed('Usage: `?ban <user mention or ID> [reason]`')] });
+  }
+  const reason = args.slice(1).join(' ') || 'No reason provided';
+
+  const problem = checkTarget(message.guild, message.member, rank, target, 'ban');
+  if (problem) return message.reply({ embeds: [errorEmbed(problem)] });
+
+  const targetInfo = { id: target.id, tag: target.user ? target.user.tag : null };
+  return runLimitedAction({
+    message,
+    rank,
+    type: 'ban',
+    target: targetInfo,
+    reason,
+    perform: () =>
+      message.guild.members.ban(target.id, {
+        reason: `${message.author.tag}: ${reason}`,
+        deleteMessageSeconds: 0,
+      }),
+  });
+}
+
+async function handleKick(message, args, rank) {
+  const target = await resolveTarget(message.guild, args[0]);
+  if (!target) {
+    return message.reply({ embeds: [errorEmbed('Usage: `?kick <user mention or ID> [reason]`')] });
+  }
+  const reason = args.slice(1).join(' ') || 'No reason provided';
+
+  const problem = checkTarget(message.guild, message.member, rank, target, 'kick');
+  if (problem) return message.reply({ embeds: [errorEmbed(problem)] });
+
+  const targetInfo = { id: target.id, tag: target.user ? target.user.tag : null };
+  return runLimitedAction({
+    message,
+    rank,
+    type: 'kick',
+    target: targetInfo,
+    reason,
+    perform: () => target.member.kick(`${message.author.tag}: ${reason}`),
+  });
+}
+
+async function handleMute(message, args, rank) {
+  const target = await resolveTarget(message.guild, args[0]);
+  const duration = parseDuration(args[1]);
+  if (!target || !duration) {
+    return message.reply({
+      embeds: [
+        errorEmbed(
+          'Usage: `?mute <user mention or ID> <duration> [reason]`\n' +
+            'Duration examples: `30m`, `2h`, `1d` (maximum 28d).'
+        ),
+      ],
+    });
+  }
+  const reason = args.slice(2).join(' ') || 'No reason provided';
+
+  const problem = checkTarget(message.guild, message.member, rank, target, 'mute');
+  if (problem) return message.reply({ embeds: [errorEmbed(problem)] });
+
+  const targetInfo = { id: target.id, tag: target.user ? target.user.tag : null };
+  return runLimitedAction({
+    message,
+    rank,
+    type: 'mute',
+    target: targetInfo,
+    reason,
+    perform: () => target.member.timeout(duration, `${message.author.tag}: ${reason}`),
+  });
+}
+
+async function handleWarn(message, args, rank) {
+  const target = await resolveTarget(message.guild, args[0]);
+  const reason = args.slice(1).join(' ').trim();
+  if (!target || !reason) {
+    return message.reply({
+      embeds: [errorEmbed('Usage: `?warn <user mention or ID> <reason>` (a reason is required)')],
+    });
+  }
+
+  const problem = checkTarget(message.guild, message.member, rank, target, 'warn');
+  if (problem) return message.reply({ embeds: [errorEmbed(problem)] });
+
+  const targetInfo = { id: target.id, tag: target.user ? target.user.tag : null };
+  return runLimitedAction({
+    message,
+    rank,
+    type: 'warn',
+    target: targetInfo,
+    reason,
+    perform: async () => {
+      addWarning(target.id, message.author.id, reason);
+      // Notify the member. A closed DM never makes the warning fail.
+      await target.user
+        .send({
+          embeds: [
+            infoEmbed(
+              'You have received a warning',
+              `**Server:** ${message.guild.name}\n**Reason:** ${reason}`,
+              0xfee75c
+            ),
+          ],
+        })
+        .catch(() => {});
+    },
+  });
+}
+
+// Unban and unmute never consume an allowance.
+async function handleUnban(message, args) {
+  const id = parseUserId(args[0]);
+  if (!id) {
+    return message.reply({ embeds: [errorEmbed('Usage: `?unban <user ID> [reason]`')] });
+  }
+  const reason = args.slice(1).join(' ') || 'No reason provided';
+  try {
+    await message.guild.bans.remove(id, `${message.author.tag}: ${reason}`);
+    await message.reply({ embeds: [infoEmbed('Unban Successful', `User ${id} has been unbanned.`, 0x57f287)] });
+    await sendLog(
+      message.guild,
+      infoEmbed(
+        'Moderation Action: Unban',
+        `Moderator: <@${message.author.id}> (${message.author.username}, ${message.author.id})\n` +
+          `Target ID: ${id}\nReason: ${reason}`,
+        0x57f287
+      ).setTimestamp()
+    );
+  } catch (error) {
+    console.error('[unban] Action failed:', error.message);
+    await message.reply({ embeds: [errorEmbed('The user could not be unbanned.')] }).catch(() => {});
+  }
+}
+
+async function handleUnmute(message, args) {
+  const target = await resolveTarget(message.guild, args[0]);
+  if (!target || !target.member) {
+    return message.reply({ embeds: [errorEmbed('Usage: `?unmute <user mention or ID> [reason]`')] });
+  }
+  const reason = args.slice(1).join(' ') || 'No reason provided';
+  try {
+    await target.member.timeout(null, `${message.author.tag}: ${reason}`);
+    await message.reply({
+      embeds: [infoEmbed('Unmute Successful', `${target.user.tag} has been unmuted.`, 0x57f287)],
+    });
+    await sendLog(
+      message.guild,
+      infoEmbed(
+        'Moderation Action: Unmute',
+        `Moderator: <@${message.author.id}> (${message.author.username}, ${message.author.id})\n` +
+          `Target: ${target.user.tag} (${target.id})\nReason: ${reason}`,
+        0x57f287
+      ).setTimestamp()
+    );
+  } catch (error) {
+    console.error('[unmute] Action failed:', error.message);
+    await message.reply({ embeds: [errorEmbed('The user could not be unmuted.')] }).catch(() => {});
+  }
+}
+
+async function handleLimits(message, args, rank) {
+  let subjectMember = message.member;
+  let subjectRank = rank;
+
+  // Only the Owner rank may inspect another moderator's limits.
+  if (args[0]) {
+    if (rank.key !== 'owner') return null;
+    const id = parseUserId(args[0]);
+    const member = id ? await message.guild.members.fetch(id).catch(() => null) : null;
+    const memberRank = getRank(member);
+    if (!member || !memberRank) {
+      return message.reply({ embeds: [errorEmbed('That user does not hold a configured staff role.')] });
+    }
+    subjectMember = member;
+    subjectRank = memberRank;
+  }
+
+  const isSelf = subjectMember.id === message.author.id;
+  const title = isSelf ? 'Your Moderation Limits' : `Moderation Limits: ${subjectMember.user.tag}`;
+
+  if (subjectRank.key === 'owner') {
+    return message.reply({
+      embeds: [
+        infoEmbed(
+          title,
+          `**${subjectRank.name}**\n\n- Bans: Unlimited\n- Kicks: Unlimited\n- Mutes: Unlimited\n- Warns: Unlimited`
+        ),
+      ],
+    });
+  }
+
+  const record = getRecord(subjectMember.id);
+  const lines = ['ban', 'kick', 'mute', 'warn']
+    .map((type) => `- ${ACTION_PLURALS[type]}: ${record[type]}/${formatLimit(subjectRank.limits[type])} used`)
+    .join('\n');
+
+  return message.reply({
+    embeds: [
+      infoEmbed(
+        title,
+        `**${subjectRank.name}**\n\n${lines}\n\nNext reset: <t:${resetTimestamp(record)}:R> (<t:${resetTimestamp(record)}:F>)`
+      ),
+    ],
+  });
+}
+
+async function handleHelp(message, rank) {
+  const lines = [
+    '`?ban <@user or ID> [reason]` - Ban a user (uses a ban)',
+    '`?kick <@user or ID> [reason]` - Kick a member (uses a kick)',
+    '`?mute <@user or ID> <duration> [reason]` - Mute a member (uses a mute)',
+    '`?warn <@user or ID> <reason>` - Warn a member (uses a warn)',
+    '`?unban <user ID> [reason]` - Unban a user',
+    '`?unmute <@user or ID> [reason]` - Remove a mute',
+    '`?limits` - Show your moderation limits and next reset',
+  ];
+
+  if (rank && rank.key === 'owner') {
+    lines.push("`?limits <@user or ID>` - Show another staff member's limits");
+  }
+
+  lines.push('`?help` - Show this message');
+
+  const rankLabel = rank ? rank.name : 'Staff (no moderation rank)';
+  const note = rank
+    ? 'Mute durations: `30m`, `2h`, `1d` (maximum 28d).'
+    : 'Your staff role does not grant access to the moderation commands above.';
+
+  return message.reply({
+    embeds: [infoEmbed('Moderation Commands', `**Your rank:** ${rankLabel}\n\n${lines.join('\n')}\n\n${note}`)],
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Message handler                                                     */
+/* ------------------------------------------------------------------ */
+
+client.on('messageCreate', async (message) => {
+  try {
+    if (message.author.bot || !message.guild) return;
+    if (!message.content.startsWith(PREFIX)) return;
+
+    const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    const command = (args.shift() || '').toLowerCase();
+
+    const known = ['ban', 'kick', 'mute', 'unban', 'unmute', 'limits', 'help', 'warn'];
+    if (!known.includes(command)) return;
+
+    // Make sure the member and their roles are fresh.
+    // message.member is read-only. Fetching caches the member, which fills the getter.
+    if (!message.member) await message.guild.members.fetch(message.author.id).catch(() => null);
+    const member = message.member;
+    if (!member) return;
+
+    // Non-staff members are ignored silently. Staff information is never exposed.
+    // getRank uses the highest configured rank, so extra roles never lower it.
+    const rank = getRank(member);
+    if (!rank && !hasExtraStaffRole(member)) return;
+
+    // ?help is available to every staff member.
+    if (command === 'help') return await handleHelp(message, rank);
+
+    // Everything else requires a moderation rank.
+    if (!rank) return;
+
+    switch (command) {
+      case 'ban':
+        return await handleBan(message, args, rank);
+      case 'kick':
+        return await handleKick(message, args, rank);
+      case 'mute':
+        return await handleMute(message, args, rank);
+      case 'warn':
+        return await handleWarn(message, args, rank);
+      case 'unban':
+        return await handleUnban(message, args);
+      case 'unmute':
+        return await handleUnmute(message, args);
+      case 'limits':
+        return await handleLimits(message, args, rank);
+      default:
+        return null;
+    }
+  } catch (error) {
+    console.error('[messageCreate] Unexpected error:', error.message);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Startup                                                             */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Message logs                                                        */
+/* ------------------------------------------------------------------ */
+
+function truncate(text, max = 1000) {
+  if (!text) return '(no text content)';
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function describeAuthor(author) {
+  return author ? `<@${author.id}> (${author.tag}, ${author.id})` : 'Unknown (message was not cached)';
+}
+
+function attachmentList(message) {
+  if (!message.attachments || message.attachments.size === 0) return null;
+  return truncate([...message.attachments.values()].map((a) => a.url).join('\n'));
+}
+
+client.on('messageDelete', async (message) => {
+  try {
+    if (!message.guild || message.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+    if (message.author && message.author.bot) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Deleted')
+      .setColor(0xed4245)
+      .addFields(
+        { name: 'Author', value: describeAuthor(message.author) },
+        { name: 'Channel', value: `<#${message.channelId}>` },
+        { name: 'Content', value: truncate(message.content) }
+      )
+      .setTimestamp();
+    const files = attachmentList(message);
+    if (files) embed.addFields({ name: 'Attachments', value: files });
+
+    await sendLog(message.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageDelete] Unexpected error:', error.message);
+  }
+});
+
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  try {
+    if (newMessage.partial) await newMessage.fetch().catch(() => null);
+    if (!newMessage.guild || newMessage.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+    if (newMessage.author && newMessage.author.bot) return;
+    if (oldMessage.content === newMessage.content) return; // embeds or pins, not an edit
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Edited')
+      .setColor(0xfee75c)
+      .addFields(
+        { name: 'Author', value: describeAuthor(newMessage.author) },
+        { name: 'Channel', value: `<#${newMessage.channelId}> ([jump to message](${newMessage.url}))` },
+        { name: 'Before', value: truncate(oldMessage.content) },
+        { name: 'After', value: truncate(newMessage.content) }
+      )
+      .setTimestamp();
+
+    await sendLog(newMessage.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageUpdate] Unexpected error:', error.message);
+  }
+});
+
+// Optional: log every message that is sent (LOG_ALL_MESSAGES=true).
+client.on('messageCreate', async (message) => {
+  try {
+    if (!LOG_ALL_MESSAGES) return;
+    if (!message.guild || message.author.bot || message.channelId === MESSAGE_LOG_CHANNEL_ID) return;
+
+    const embed = new EmbedBuilder()
+      .setTitle('Message Sent')
+      .setColor(0x5865f2)
+      .addFields(
+        { name: 'Author', value: describeAuthor(message.author) },
+        { name: 'Channel', value: `<#${message.channelId}> ([jump to message](${message.url}))` },
+        { name: 'Content', value: truncate(message.content) }
+      )
+      .setTimestamp();
+    const files = attachmentList(message);
+    if (files) embed.addFields({ name: 'Attachments', value: files });
+
+    await sendLog(message.guild, embed, MESSAGE_LOG_CHANNEL_ID);
+  } catch (error) {
+    console.error('[messageCreate log] Unexpected error:', error.message);
+  }
+});
+
+// Minimal HTTP server so Render detects an open port (Web Service hosting).
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running.');
+  })
+  .listen(PORT, () => console.log(`Health server listening on port ${PORT}`));
+
+client.once('clientReady', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+process.on('unhandledRejection', (error) => {
+  console.error('[process] Unhandled rejection:', error && error.message ? error.message : error);
+});
+
+if (!TOKEN) {
+  console.error('Missing TOKEN environment variable.');
+  process.exit(1);
+}
+
+loadStore();
+loadWarnings();
+client.login(TOKEN);
