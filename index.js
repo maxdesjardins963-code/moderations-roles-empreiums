@@ -842,7 +842,7 @@ if (!TOKEN) {
 
 // Country collecting game (slash commands, spawns in its own channel).
 // Needs countries.js in the same folder as this file.
-require('./countries').init(client, { dataDir: DATA_DIR });
+
 
 loadStore();
 loadWarnings();
